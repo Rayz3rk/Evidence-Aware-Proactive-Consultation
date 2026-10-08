@@ -1,0 +1,64 @@
+{
+  "status": "pass",
+  "allowed_quality_statuses": [
+    "released"
+  ],
+  "rows": 2000,
+  "unique_pair_ids": 1000,
+  "task_counts": {
+    "normal_dialogue": 1000,
+    "evidence_missing_question": 1000
+  },
+  "route_counts": {
+    "answer": 871,
+    "answer_and_ask": 129,
+    "ask": 1000
+  },
+  "normal_question_like_count": 129,
+  "normal_question_like_fraction": 0.129,
+  "inquiry_missing_slot_count": 0,
+  "slot_counts": {
+    "duration": 508,
+    "onset": 318,
+    "frequency": 86,
+    "course": 37,
+    "aggravating_factor": 43,
+    "relieving_factor": 8
+  },
+  "slot_vocabulary": [
+    "aggravating_factor",
+    "course",
+    "duration",
+    "frequency",
+    "onset",
+    "relieving_factor"
+  ],
+  "pairs_with_both_views": 1000,
+  "pairs_with_unexpected_task_types": {},
+  "pairs_with_multiple_sources": {},
+  "examples": {
+    "missing_slot_pair_ids": [],
+    "normal_question_like_pair_ids": [
+      "mix_013460c17948b386",
+      "mix_01e3deb14cb024aa",
+      "mix_072cd3c022fb6a7d",
+      "mix_09bd5c25e37ff103",
+      "mix_0ccaf3e865af1e61",
+      "mix_0d8e56eb7fad8d43",
+      "mix_106a1cfb48802df8",
+      "mix_124fa7eadba03bae",
+      "mix_1446a28b497ceaa6",
+      "mix_150fee15489fe5a6",
+      "mix_16f7ed8f6fe903bf",
+      "mix_17b46434ba355976",
+      "mix_1a058f561e1dd703",
+      "mix_1ac6f75a13b81d00",
+      "mix_1ae542068d7e24b8",
+      "mix_1df6ce4771b4a158",
+      "mix_1f62505e2d0bf9ee",
+      "mix_2354990910d77eae",
+      "mix_2496038bd1f675e0",
+      "mix_2b57317d55b4774e"
+    ]
+  }
+}

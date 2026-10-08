@@ -1,0 +1,17 @@
+{
+  "status": "released",
+  "summary": {
+    "release": "scope2000_repaired_1k",
+    "source_release": "scope6000",
+    "normal_views": 1000,
+    "inquiry_views": 1000,
+    "total_views": 2000,
+    "pair_count": 1000,
+    "replacements": 92,
+    "existing_inquiries_used": 908,
+    "quality_status": "released",
+    "no_cycle_resampling_in_release": true,
+    "created_at": "2026-10-03T11:08:00+0800"
+  },
+  "automatic_checks": "same-model blind and semantic screening; no clinical validation"
+}
