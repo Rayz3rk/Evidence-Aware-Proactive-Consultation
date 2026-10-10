@@ -60,8 +60,8 @@ def metric_block(y_true: list[int], y_pred: list[int], labels: list[int]) -> dic
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--data-file", type=Path, default=ROOT / "outputs" / "mixed_dialogue_full_v4_20260917" / "releases" / "scope3000" / "sft_candidates.auto.jsonl")
-    parser.add_argument("--audit-file", type=Path, default=ROOT / "outputs" / "mixed_dialogue_full_v4_20260917" / "releases" / "scope3000" / "paired_contexts.auto.jsonl")
+    parser.add_argument("--data-file", type=Path, default=ROOT / "data" / "EviGap-Med" / "sft_candidates.auto.jsonl")
+    parser.add_argument("--audit-file", type=Path, default=ROOT / "data" / "EviGap-Med" / "paired_contexts.auto.jsonl")
     parser.add_argument("--dev-fraction", type=float, default=0.1)
     parser.add_argument("--quality-status", action="append", default=None, help="Allow this release quality_status; repeat for multiple statuses")
     parser.add_argument("--batch-size", type=int, default=2)

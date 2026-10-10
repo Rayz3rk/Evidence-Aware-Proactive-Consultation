@@ -1,4 +1,4 @@
-"""Validate the scope3000 evidence-aware training views before training."""
+"""Validate the EviGap-Med evidence-aware training views before training."""
 from __future__ import annotations
 
 import argparse
@@ -22,8 +22,8 @@ from proactive_consultation.scope3000 import load_views  # noqa: E402
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-file", type=Path, default=ROOT / "outputs" / "mixed_dialogue_full_v4_20260917" / "releases" / "scope3000" / "sft_candidates.auto.jsonl")
-    parser.add_argument("--audit-file", type=Path, default=ROOT / "outputs" / "mixed_dialogue_full_v4_20260917" / "releases" / "scope3000" / "paired_contexts.auto.jsonl")
+    parser.add_argument("--data-file", type=Path, default=ROOT / "data" / "EviGap-Med" / "sft_candidates.auto.jsonl")
+    parser.add_argument("--audit-file", type=Path, default=ROOT / "data" / "EviGap-Med" / "paired_contexts.auto.jsonl")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--quality-status", action="append", default=None, help="Allow this release quality_status; repeat for multiple statuses")
     args = parser.parse_args()

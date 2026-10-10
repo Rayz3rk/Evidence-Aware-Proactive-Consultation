@@ -24,8 +24,8 @@ def metrics(ytrue,ypred,labels):
 
 root=ROOT
 out=root/'outputs/checkpoints/evidence_aware_scope2000_repaired_1to1_serial_20epoch_saved'
-data=root/'outputs/mixed_dialogue_full_v4_20260917/releases/scope2000_repaired_1k/sft_candidates.auto.jsonl'
-audit=root/'outputs/mixed_dialogue_full_v4_20260917/releases/scope2000_repaired_1k/paired_contexts.auto.jsonl'
+data=root/'data/EviGap-Med/sft_candidates.auto.jsonl'
+audit=root/'data/EviGap-Med/paired_contexts.auto.jsonl'
 manifest=json.loads((out/'evidence_aware_manifest.json').read_text(encoding='utf-8'))
 processor=AutoProcessor.from_pretrained(str(out)); tok=processor.tokenizer
 rows=load_views(data,'joint',allowed_quality_statuses={'auto_pass_pending_human'})

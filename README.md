@@ -32,7 +32,7 @@ tests/
   test_evidence_aware.py
 
 data/
-  EviGap-Med/scope2000_repaired_1k/  # 1,000 ordinary-response views and 1,000 evidence-missing inquiry views
+  EviGap-Med/  # 1,000 ordinary-response views and 1,000 evidence-missing inquiry views
 
 example/
   data/fused_medical/general/test.jsonl  # Fixed main-evaluation test set
@@ -42,14 +42,16 @@ The repository does **not** contain private experiment configuration, manuscript
 
 ## Dataset
 
-`data/EviGap-Med/scope2000_repaired_1k` is the release used for the reported 1:1 LoRA+EASC training mixture. The principal files are:
+**EviGap-Med** is the **Evidence-Gap Supervision Dataset for Chinese Medical Dialogue**, as defined in the paper. The historical construction identifier is `scope2000_repaired_1k`; the public dataset name and directory are `EviGap-Med`.
+
+`data/EviGap-Med` is the release used for the reported 1:1 LoRA+EASC training mixture. The principal files are:
 
 | File | Purpose | SHA256 |
 | --- | --- | --- |
 | `sft_candidates.auto.jsonl` | Training views | `11c0d3dec0f9224065b71e467790aa52b309c030d992b1e4730873badb05c75f` |
 | `paired_contexts.auto.jsonl` | Audit and provenance records | `22ca55a11411ae3ffc85127765002d2fc5b617be0422b2f81c026000682c784b` |
 
-The release contains 1,000 ordinary-response views and 1,000 evidence-missing inquiry views with a 1:1 mixture and seed 42. Audit metadata is used for supervision and verification and is not inserted into model-visible prompts.
+The release contains 1,000 context pairs from four source datasets (250 pairs per source), split into 1,784 training views and 216 development views. It contains 1,000 ordinary-response views and 1,000 evidence-missing inquiry views with a 1:1 mixture and seed 42. Audit metadata is used for supervision and verification and is not inserted into model-visible prompts.
 
 The source medical-dialogue datasets retain their original terms. Access and reuse require compliance with those terms. Inclusion in this repository does not grant a new license over underlying dialogue content and does not imply clinical validation.
 
@@ -108,8 +110,8 @@ training:
 ```powershell
 $env:PYTHONPATH = "$PWD\src"
 python scripts/audit_evidence_aware_data.py `
-  --data-file data/EviGap-Med/scope2000_repaired_1k/sft_candidates.auto.jsonl `
-  --audit-file data/EviGap-Med/scope2000_repaired_1k/paired_contexts.auto.jsonl
+  --data-file data/EviGap-Med/sft_candidates.auto.jsonl `
+  --audit-file data/EviGap-Med/paired_contexts.auto.jsonl
 ```
 
 ## Train
@@ -118,13 +120,13 @@ python scripts/audit_evidence_aware_data.py `
 $env:PYTHONPATH = "$PWD\src"
 python scripts/train_evidence_aware.py `
   --config path/to/your_experiment.yaml `
-  --data-file data/EviGap-Med/scope2000_repaired_1k/sft_candidates.auto.jsonl `
-  --audit-file data/EviGap-Med/scope2000_repaired_1k/paired_contexts.auto.jsonl `
+  --data-file data/EviGap-Med/sft_candidates.auto.jsonl `
+  --audit-file data/EviGap-Med/paired_contexts.auto.jsonl `
   --task-mode joint `
   --mix-ratio 1:1 `
   --seed 42 `
   --epochs 3 `
-  --quality-status released
+  --quality-status released `
   --output-dir outputs/checkpoints/easc_run
 ```
 
@@ -157,8 +159,8 @@ python scripts/run_evidence_aware.py `
 $env:PYTHONPATH = "$PWD\src"
 python scripts/evaluate_evidence_aware.py `
   --checkpoint outputs/checkpoints/easc_run `
-  --data-file data/EviGap-Med/scope2000_repaired_1k/sft_candidates.auto.jsonl `
-  --audit-file data/EviGap-Med/scope2000_repaired_1k/paired_contexts.auto.jsonl
+  --data-file data/EviGap-Med/sft_candidates.auto.jsonl `
+  --audit-file data/EviGap-Med/paired_contexts.auto.jsonl
 ```
 
 The fixed main-evaluation input is provided at `example/data/fused_medical/general/test.jsonl`.
