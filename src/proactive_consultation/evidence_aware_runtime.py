@@ -11,6 +11,8 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
+from .token_limits import generation_token_kwargs, token_limit
+
 from .evidence_aware import (
     ANSWER_AND_ASK_ROUTE,
     ANSWER_ROUTE,
@@ -53,16 +55,16 @@ class EvidenceAwareRuntime:
         checkpoint: str | Path,
         *,
         device_map: str | None = "auto",
-        max_input_tokens: int = 2048,
-        max_new_tokens: int = 96,
+        max_input_tokens: int | None = None,
+        max_new_tokens: int | None = None,
         route_threshold: float = 0.5,
         max_gpu_memory: str | None = None,
         max_cpu_memory: str = "48GiB",
     ) -> None:
         self.checkpoint = Path(checkpoint).expanduser().resolve()
         self.device_map = device_map
-        self.max_input_tokens = int(max_input_tokens)
-        self.max_new_tokens = int(max_new_tokens)
+        self.max_input_tokens = token_limit(max_input_tokens)
+        self.max_new_tokens = token_limit(max_new_tokens)
         self.route_threshold = float(route_threshold)
         self.max_gpu_memory = max_gpu_memory
         self.max_cpu_memory = max_cpu_memory
@@ -83,8 +85,11 @@ class EvidenceAwareRuntime:
             raise FileNotFoundError(f"Missing evidence-aware manifest: {manifest_path}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.slots = list(manifest.get("slot_vocabulary") or [])
-        if not self.slots:
-            raise ValueError("Checkpoint has no inquiry-slot vocabulary")
+        self.control_mode = str(manifest.get("control_mode", "route_slot"))
+        self.slot_condition = str(manifest.get("slot_condition", "route"))
+        slot_head_enabled = bool(manifest.get("slot_head_enabled", bool(self.slots)))
+        if slot_head_enabled and not self.slots:
+            raise ValueError("Checkpoint with a slot head has no inquiry-slot vocabulary")
         manifest_routes = manifest.get("route_labels") or ROUTE_LABELS
         self.route_labels = {str(name): int(index) for name, index in manifest_routes.items()}
         if ASK_ROUTE not in self.route_labels or ANSWER_ROUTE not in self.route_labels:
@@ -115,13 +120,14 @@ class EvidenceAwareRuntime:
         backbone = PeftModel.from_pretrained(base, str(adapter_path))
         self.model = EvidenceAwareModel(
             backbone,
-            len(self.slots),
+            len(self.slots) if slot_head_enabled else 0,
             manifest.get("route_loss_weight", 0.5),
             manifest.get("slot_loss_weight", 0.5),
             route_labels=self.route_labels,
             route_class_weights=manifest.get("route_class_weights"),
-            slot_class_weights=manifest.get("slot_class_weights"),
-            slot_names=self.slots,
+            slot_class_weights=manifest.get("slot_class_weights") if slot_head_enabled else [],
+            slot_names=self.slots if slot_head_enabled else [],
+            slot_condition=self.slot_condition,
         )
         heads = torch.load(heads_path, map_location="cpu")
         self.model.route_head.load_state_dict(heads["route_head"])
@@ -135,7 +141,7 @@ class EvidenceAwareRuntime:
             self.model.slot_head.load_state_dict(heads["slot_head"])
         if heads.get("route_class_weights") is not None:
             self.model.route_class_weights.copy_(torch.tensor(heads["route_class_weights"], dtype=torch.float32))
-        if heads.get("slot_class_weights") is not None:
+        if self.model.slot_head is not None and heads.get("slot_class_weights") is not None:
             self.model.slot_class_weights.copy_(torch.tensor(heads["slot_class_weights"], dtype=torch.float32))
         self.model.eval()
         self._loaded = True
@@ -147,7 +153,7 @@ class EvidenceAwareRuntime:
         return embeddings.weight.device
 
     def _trim_context(self, ids: list[int], context_length: int, prompt_length: int) -> tuple[list[int], int]:
-        if len(ids) <= self.max_input_tokens:
+        if self.max_input_tokens is None or len(ids) <= self.max_input_tokens:
             return ids, context_length
         control_length = prompt_length - context_length
         if control_length + 1 > self.max_input_tokens:
@@ -163,7 +169,82 @@ class EvidenceAwareRuntime:
         text = re.sub(r"<analysis>.*?</analysis>", "", text, flags=re.I | re.S)
         for marker in ("[ROUTE=ANSWER]", "[ROUTE=ASK]", "[ROUTE=ANSWER_AND_ASK]"):
             text = text.replace(marker, "")
-        return re.sub(r"\[INQUIRY_SLOT=[^\]]+\]", "", text).strip()
+        text = re.sub(r"\[INQUIRY_SLOT=[^\]]+\]", "", text)
+        return re.sub(r"\[GENERATION_STAGE=[^\]]+\]", "", text).strip()
+
+    @torch.inference_mode()
+    def _generate_completion(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        controls: Sequence[str],
+    ) -> str:
+        """Generate one completion from a message context and internal controls."""
+        assert self.processor is not None and self.tokenizer is not None and self.model is not None
+        ids, context_length, prompt_length = encode_context_with_controls(
+            self.processor, messages, controls
+        )
+        ids, _ = self._trim_context(ids, context_length, prompt_length)
+        device = self._input_device()
+        input_ids = torch.tensor([ids], dtype=torch.long, device=device)
+        attention_mask = torch.ones_like(input_ids)
+        output = self.model.backbone.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **generation_token_kwargs(self.max_new_tokens),
+            do_sample=False,
+            use_cache=True,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+        generated_ids = output[0, input_ids.shape[1]:]
+        return self._clean_completion(
+            self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        )
+
+    def _generate_answer_and_ask(
+        self,
+        messages: Sequence[Mapping[str, str]],
+    ) -> str:
+        """Generate the mixed response in two inference stages.
+
+        This is intentionally an inference-only decomposition: the first stage
+        drafts the answer, and the second stage receives that draft and is
+        instructed to produce only a concise follow-up question.  The two
+        strings are joined before being returned, so callers still observe one
+        response.  Training targets and result fields remain unchanged.
+        """
+        answer = self._generate_completion(
+            messages,
+            make_control_tokens(
+                self.route_labels[ANSWER_ROUTE], None, self.control_mode
+            ),
+        )
+        if not answer:
+            return self._generate_completion(
+                messages,
+                make_control_tokens(
+                    self.route_labels[ANSWER_AND_ASK_ROUTE], None, self.control_mode
+                ),
+            )
+
+        follow_up_messages = [dict(message) for message in messages]
+        follow_up_messages.append({"role": "assistant", "content": answer})
+        follow_up_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "请基于以上回答，仅生成一个简短、自然的后续追问；"
+                    "不要重复回答，不要解释你的生成过程。"
+                ),
+            }
+        )
+        question = self._generate_completion(
+            follow_up_messages,
+            make_control_tokens(
+                self.route_labels[ANSWER_AND_ASK_ROUTE], None, self.control_mode
+            ),
+        )
+        return " ".join(part for part in (answer, question) if part).strip()
 
     def _route_from_probs(self, probs: torch.Tensor) -> tuple[str, float, float]:
         names_by_id = {index: name for name, index in self.route_labels.items()}
@@ -216,23 +297,15 @@ class EvidenceAwareRuntime:
         route, slot, ask_probability, route_confidence, slot_confidence, route_probabilities = self.predict_route_and_slot(messages)
         if route == ASK_ROUTE and slot is None:
             raise RuntimeError("Ask route was selected but no slot head is available")
-        controls = make_control_tokens(self.route_labels[route], slot if route == ASK_ROUTE else None)
-        ids, context_length, prompt_length = encode_context_with_controls(self.processor, messages, controls)
-        ids, _ = self._trim_context(ids, context_length, prompt_length)
-        device = self._input_device()
-        input_ids = torch.tensor([ids], dtype=torch.long, device=device)
-        attention_mask = torch.ones_like(input_ids)
-        output = self.model.backbone.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=self.max_new_tokens,
-            do_sample=False,
-            use_cache=True,
-            pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-        )
-        generated_ids = output[0, input_ids.shape[1]:]
-        completion = self._clean_completion(self.tokenizer.decode(generated_ids, skip_special_tokens=True))
+        if route == ANSWER_AND_ASK_ROUTE:
+            completion = self._generate_answer_and_ask(messages)
+        else:
+            controls = make_control_tokens(
+                self.route_labels[route],
+                slot if route == ASK_ROUTE else None,
+                self.control_mode,
+            )
+            completion = self._generate_completion(messages, controls)
         return EvidenceAwareResult(
             route=route,
             slot=slot if route == ASK_ROUTE else None,
@@ -242,4 +315,3 @@ class EvidenceAwareRuntime:
             slot_confidence=slot_confidence if route == ASK_ROUTE else None,
             route_probabilities=route_probabilities,
         )
-

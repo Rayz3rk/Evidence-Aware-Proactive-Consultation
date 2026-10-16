@@ -113,3 +113,16 @@ def test_normal_dialogue_with_question_is_mixed_route():
     assert route_for_row({"task_type": "normal_dialogue", "completion": "建议先观察。"}) == ANSWER_ROUTE
     assert route_for_row({"task_type": "normal_dialogue", "completion": "建议先观察，您是否发热？"}) == ANSWER_AND_ASK_ROUTE
     assert route_for_row({"task_type": "evidence_missing_question", "completion": "请问什么时候开始？"}) == ASK_ROUTE
+
+
+def test_plain_lora_configuration_has_generation_only_gradients():
+    rows = [{"pair_id": "p1", "task_type": "normal_dialogue",
+             "messages": [{"role": "user", "content": "患者描述"}], "completion": "建议先观察。"}]
+    examples = build_examples(DummyProcessor(), rows, {}, {}, control_mode="none")
+    model = EvidenceAwareModel(DummyBackbone(), num_slots=0, route_loss_weight=0, slot_loss_weight=0)
+    output = model(**EvidenceAwareCollator(0)(examples))
+    assert torch.equal(output["loss"], output["lm_loss"])
+    output["loss"].backward()
+    assert model.backbone.embed.weight.grad.abs().sum() > 0
+    assert model.route_head.weight.grad is None or torch.count_nonzero(model.route_head.weight.grad) == 0
+    assert model.route_embedding.weight.grad is None

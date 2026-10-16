@@ -18,6 +18,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset
 
+from .token_limits import token_limit
+
 ANSWER_ROUTE = "answer"
 ASK_ROUTE = "ask"
 ANSWER_AND_ASK_ROUTE = "answer_and_ask"
@@ -155,22 +157,37 @@ def build_examples(
     pair_slots: Mapping[str, str],
     slot_to_id: Mapping[str, int],
     max_length: int | None = None,
+    control_mode: str = "route_slot",
 ) -> list[dict[str, Any]]:
     """Build tokenized examples while excluding audit content from prompts."""
+    max_length = token_limit(max_length)
     examples: list[dict[str, Any]] = []
     tokenizer = processor.tokenizer
     eos_ids = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
     for row in rows:
         pair_id = row["pair_id"]
         route = route_for_row(row)
-        if route == ASK_ROUTE:
-            if pair_id not in pair_slots:
-                raise ValueError(f"Missing slot label for inquiry pair {pair_id!r}")
-            controls = [ASK_CONTROL, slot_token(pair_slots[pair_id])]
-        elif route == ANSWER_AND_ASK_ROUTE:
-            controls = [ANSWER_AND_ASK_CONTROL]
+        if control_mode not in {"route_slot", "route_only", "slot_only", "none"}:
+            raise ValueError(f"Unsupported control_mode={control_mode!r}")
+        if route == ASK_ROUTE and pair_id not in pair_slots:
+            raise ValueError(f"Missing slot label for inquiry pair {pair_id!r}")
+        if control_mode == "route_slot":
+            if route == ASK_ROUTE:
+                controls = [ASK_CONTROL, slot_token(pair_slots[pair_id])]
+            elif route == ANSWER_AND_ASK_ROUTE:
+                controls = [ANSWER_AND_ASK_CONTROL]
+            else:
+                controls = [ANSWER_CONTROL]
+        elif control_mode == "route_only":
+            controls = {
+                ASK_ROUTE: [ASK_CONTROL],
+                ANSWER_AND_ASK_ROUTE: [ANSWER_AND_ASK_CONTROL],
+                ANSWER_ROUTE: [ANSWER_CONTROL],
+            }[route]
+        elif control_mode == "slot_only":
+            controls = [slot_token(pair_slots[pair_id])] if route == ASK_ROUTE else []
         else:
-            controls = [ANSWER_CONTROL]
+            controls = []
         prompt_ids, context_length, prompt_length = encode_context_with_controls(
             processor, row["messages"], controls
         )
@@ -276,6 +293,7 @@ class EvidenceAwareModel(nn.Module):
         route_class_weights: Sequence[float] | None = None,
         slot_class_weights: Sequence[float] | None = None,
         slot_names: Sequence[str] | None = None,
+        slot_condition: str = "route",
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -289,11 +307,14 @@ class EvidenceAwareModel(nn.Module):
         self.num_routes = max(self.route_labels.values()) + 1
         self.route_head = nn.Linear(self.hidden_size, self.num_routes)
         self.route_embedding = nn.Embedding(self.num_routes, self.hidden_size)
-        self.slot_head = nn.Linear(self.hidden_size * 2, num_slots) if num_slots else None
+        self.slot_head = nn.Linear(self.hidden_size * (2 if slot_condition == "route" else 1), num_slots) if num_slots else None
         self.route_loss_weight = float(route_loss_weight)
         self.slot_loss_weight = float(slot_loss_weight)
         self.num_slots = int(num_slots)
         self.slot_names = list(slot_names or [])
+        self.slot_condition = str(slot_condition)
+        if self.slot_condition not in {"route", "context"}:
+            raise ValueError("slot_condition must be route or context")
         if self.slot_names and len(self.slot_names) != self.num_slots:
             raise ValueError("slot_names length must match num_slots")
         self.config = backbone.config
@@ -361,14 +382,17 @@ class EvidenceAwareModel(nn.Module):
             route_logits = self._head_forward(self.route_head, pooled)
             result["route_logits"] = route_logits
             if self.slot_head is not None:
-                route_embedding = self._route_condition_embedding(route_logits, hard=hard_route_condition)
-                slot_input = torch.cat(
-                    [
-                        pooled.to(device=self.slot_head.weight.device, dtype=self.slot_head.weight.dtype),
-                        route_embedding.to(device=self.slot_head.weight.device, dtype=self.slot_head.weight.dtype),
-                    ],
-                    dim=-1,
-                )
+                if self.slot_condition == "route":
+                    route_embedding = self._route_condition_embedding(route_logits, hard=hard_route_condition)
+                    slot_input = torch.cat(
+                        [
+                            pooled.to(device=self.slot_head.weight.device, dtype=self.slot_head.weight.dtype),
+                            route_embedding.to(device=self.slot_head.weight.device, dtype=self.slot_head.weight.dtype),
+                        ],
+                        dim=-1,
+                    )
+                else:
+                    slot_input = pooled.to(device=self.slot_head.weight.device, dtype=self.slot_head.weight.dtype)
                 result["slot_logits"] = self._head_forward(self.slot_head, slot_input)
                 result["slot_condition_route"] = (
                     route_logits.argmax(dim=-1).detach()
@@ -428,13 +452,23 @@ class EvidenceAwareModel(nn.Module):
         return route, slot
 
 
-def make_control_tokens(route: int, slot: str | None = None) -> list[str]:
+def make_control_tokens(route: int, slot: str | None = None, control_mode: str = "route_slot") -> list[str]:
+    if control_mode == "none":
+        return []
     if route == ROUTE_LABELS[ANSWER_ROUTE]:
-        return [ANSWER_CONTROL]
+        return [ANSWER_CONTROL] if control_mode in {"route_slot", "route_only"} else []
     if route == ROUTE_LABELS[ASK_ROUTE]:
-        if slot is None:
-            raise ValueError("Ask route requires a slot")
-        return [ASK_CONTROL, slot_token(slot)]
+        if control_mode == "route_only":
+            return [ASK_CONTROL]
+        if control_mode == "slot_only":
+            if slot is None:
+                raise ValueError("Ask route requires a slot")
+            return [slot_token(slot)]
+        if control_mode == "route_slot":
+            if slot is None:
+                raise ValueError("Ask route requires a slot")
+            return [ASK_CONTROL, slot_token(slot)]
+        raise ValueError(f"Unknown control_mode={control_mode!r}")
     if route == ROUTE_LABELS[ANSWER_AND_ASK_ROUTE]:
-        return [ANSWER_AND_ASK_CONTROL]
+        return [ANSWER_AND_ASK_CONTROL] if control_mode in {"route_slot", "route_only"} else []
     raise ValueError(f"Unknown route id: {route}")

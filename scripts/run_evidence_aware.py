@@ -35,8 +35,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--messages-json", type=Path, required=True)
-    parser.add_argument("--max-new-tokens", type=int, default=96)
-    parser.add_argument("--max-input-tokens", type=int, default=2048)
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="No limit by default; 0 disables the limit")
+    parser.add_argument("--max-input-tokens", type=int, default=None, help="No limit by default; 0 disables the limit")
     parser.add_argument("--route-threshold", type=float, default=0.5)
     args = parser.parse_args()
     runtime = EvidenceAwareRuntime(
