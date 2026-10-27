@@ -280,7 +280,9 @@ class EvidenceAwareModel(nn.Module):
     ``z`` first; the slot head then receives a route-conditioned representation
     together with the pooled context and predicts ``s``.  Training uses a
     differentiable route posterior, while inference uses the selected route,
-    so the deployed path is ``c -> z -> s -> generation``.
+    so the standalone inquiry path is ``c -> z -> s -> generation``.  A mixed
+    response reuses this ASK-conditioned slot head on ``c + generated answer``
+    before producing its follow-up; mixed training views retain masked slots.
     """
 
     def __init__(
@@ -341,12 +343,22 @@ class EvidenceAwareModel(nn.Module):
         )
 
     def _route_condition_embedding(
-        self, route_logits: torch.Tensor, hard: bool = False
+        self,
+        route_logits: torch.Tensor,
+        hard: bool = False,
+        route_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return the route-conditioned representation for slot prediction."""
         embedding_weight = self.route_embedding.weight.to(
             device=route_logits.device, dtype=route_logits.dtype
         )
+        if route_ids is not None:
+            if route_ids.shape != route_logits.shape[:-1]:
+                raise ValueError("slot_route_ids must contain one route id per context")
+            route_ids = route_ids.to(device=route_logits.device, dtype=torch.long)
+            if ((route_ids < 0) | (route_ids >= self.num_routes)).any():
+                raise ValueError("slot_route_ids contains an unknown route id")
+            return F.embedding(route_ids, embedding_weight)
         if hard:
             route_ids = route_logits.argmax(dim=-1)
             return F.embedding(route_ids, embedding_weight)
@@ -363,6 +375,7 @@ class EvidenceAwareModel(nn.Module):
         slot_labels: torch.Tensor | None = None,
         prompt_lengths: torch.Tensor | None = None,
         hard_route_condition: bool = False,
+        slot_route_ids: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         del prompt_lengths
@@ -383,7 +396,12 @@ class EvidenceAwareModel(nn.Module):
             result["route_logits"] = route_logits
             if self.slot_head is not None:
                 if self.slot_condition == "route":
-                    route_embedding = self._route_condition_embedding(route_logits, hard=hard_route_condition)
+                    # A mixed response reuses the ASK-trained slot head after
+                    # its answer stage; this override does not relabel the
+                    # top-level route or add slot supervision to mixed views.
+                    route_embedding = self._route_condition_embedding(
+                        route_logits, hard=hard_route_condition, route_ids=slot_route_ids
+                    )
                     slot_input = torch.cat(
                         [
                             pooled.to(device=self.slot_head.weight.device, dtype=self.slot_head.weight.dtype),
@@ -395,7 +413,8 @@ class EvidenceAwareModel(nn.Module):
                     slot_input = pooled.to(device=self.slot_head.weight.device, dtype=self.slot_head.weight.dtype)
                 result["slot_logits"] = self._head_forward(self.slot_head, slot_input)
                 result["slot_condition_route"] = (
-                    route_logits.argmax(dim=-1).detach()
+                    slot_route_ids.to(route_logits.device).detach()
+                    if slot_route_ids is not None else route_logits.argmax(dim=-1).detach()
                 )
             else:
                 result["slot_logits"] = None

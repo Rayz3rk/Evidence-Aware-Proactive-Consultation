@@ -27,6 +27,8 @@ from .evidence_aware import (
 
 @dataclass(frozen=True)
 class EvidenceAwareResult:
+    """One displayed turn; slot describes an ASK or mixed-route follow-up."""
+
     route: str
     slot: str | None
     completion: str
@@ -204,14 +206,12 @@ class EvidenceAwareRuntime:
     def _generate_answer_and_ask(
         self,
         messages: Sequence[Mapping[str, str]],
-    ) -> str:
-        """Generate the mixed response in two inference stages.
+    ) -> tuple[str, str | None, float | None]:
+        """Answer, select a slot from the augmented context, then ask.
 
-        This is intentionally an inference-only decomposition: the first stage
-        drafts the answer, and the second stage receives that draft and is
-        instructed to produce only a concise follow-up question.  The two
-        strings are joined before being returned, so callers still observe one
-        response.  Training targets and result fields remain unchanged.
+        The follow-up uses the slot head learned on ASK views, conditioned on
+        the ASK route.  This inference decomposition leaves the training
+        targets unchanged and retains ANSWER_AND_ASK as the displayed route.
         """
         answer = self._generate_completion(
             messages,
@@ -219,16 +219,10 @@ class EvidenceAwareRuntime:
                 self.route_labels[ANSWER_ROUTE], None, self.control_mode
             ),
         )
-        if not answer:
-            return self._generate_completion(
-                messages,
-                make_control_tokens(
-                    self.route_labels[ANSWER_AND_ASK_ROUTE], None, self.control_mode
-                ),
-            )
-
         follow_up_messages = [dict(message) for message in messages]
-        follow_up_messages.append({"role": "assistant", "content": answer})
+        if answer:
+            follow_up_messages.append({"role": "assistant", "content": answer})
+        slot, slot_confidence = self.predict_inquiry_slot(follow_up_messages)
         follow_up_messages.append(
             {
                 "role": "user",
@@ -240,11 +234,52 @@ class EvidenceAwareRuntime:
         )
         question = self._generate_completion(
             follow_up_messages,
-            make_control_tokens(
+            self._inquiry_controls(slot),
+        )
+        completion = " ".join(part for part in (answer, question) if part).strip()
+        return completion, slot, slot_confidence
+
+    def _inquiry_controls(self, slot: str | None) -> list[str]:
+        """Use ASK slot controls, with a no-slot mixed-route ablation fallback."""
+        if slot is None:
+            return make_control_tokens(
                 self.route_labels[ANSWER_AND_ASK_ROUTE], None, self.control_mode
+            )
+        return make_control_tokens(self.route_labels[ASK_ROUTE], slot, self.control_mode)
+
+    @torch.inference_mode()
+    def predict_inquiry_slot(
+        self, messages: Sequence[Mapping[str, str]]
+    ) -> tuple[str | None, float | None]:
+        """Select a follow-up slot from c+a using the ASK-conditioned head.
+
+        A checkpoint with its slot head disabled returns no slot; it is a
+        no-slot ablation rather than a slot-controlled mixed response.
+        """
+        self.load()
+        assert self.processor is not None and self.model is not None
+        if self.model.slot_head is None:
+            return None, None
+        context_ids, context_length, prompt_length = encode_context_with_controls(
+            self.processor, messages
+        )
+        context_ids, context_length = self._trim_context(
+            context_ids, context_length, prompt_length
+        )
+        device = self._input_device()
+        input_ids = torch.tensor([context_ids], dtype=torch.long, device=device)
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            context_lengths=torch.tensor([context_length], dtype=torch.long, device=device),
+            hard_route_condition=True,
+            slot_route_ids=torch.tensor(
+                [self.route_labels[ASK_ROUTE]], dtype=torch.long, device=device
             ),
         )
-        return " ".join(part for part in (answer, question) if part).strip()
+        slot_probs = torch.softmax(outputs["slot_logits"], dim=-1).detach().float().cpu()[0]
+        slot_id = int(slot_probs.argmax())
+        return self.slots[slot_id], float(slot_probs[slot_id])
 
     def _route_from_probs(self, probs: torch.Tensor) -> tuple[str, float, float]:
         names_by_id = {index: name for name, index in self.route_labels.items()}
@@ -298,7 +333,7 @@ class EvidenceAwareRuntime:
         if route == ASK_ROUTE and slot is None:
             raise RuntimeError("Ask route was selected but no slot head is available")
         if route == ANSWER_AND_ASK_ROUTE:
-            completion = self._generate_answer_and_ask(messages)
+            completion, slot, slot_confidence = self._generate_answer_and_ask(messages)
         else:
             controls = make_control_tokens(
                 self.route_labels[route],
@@ -308,10 +343,10 @@ class EvidenceAwareRuntime:
             completion = self._generate_completion(messages, controls)
         return EvidenceAwareResult(
             route=route,
-            slot=slot if route == ASK_ROUTE else None,
+            slot=slot if route in {ASK_ROUTE, ANSWER_AND_ASK_ROUTE} else None,
             completion=completion,
             ask_probability=ask_probability,
             route_confidence=route_confidence,
-            slot_confidence=slot_confidence if route == ASK_ROUTE else None,
+            slot_confidence=slot_confidence if route in {ASK_ROUTE, ANSWER_AND_ASK_ROUTE} else None,
             route_probabilities=route_probabilities,
         )

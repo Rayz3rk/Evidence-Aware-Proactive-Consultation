@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import torch
+import pytest
 from torch import nn
 
 from proactive_consultation.evidence_aware import (
@@ -126,3 +127,43 @@ def test_plain_lora_configuration_has_generation_only_gradients():
     assert model.backbone.embed.weight.grad.abs().sum() > 0
     assert model.route_head.weight.grad is None or torch.count_nonzero(model.route_head.weight.grad) == 0
     assert model.route_embedding.weight.grad is None
+
+
+def test_slot_route_override_reuses_ask_embedding_without_relabeling_route():
+    model = EvidenceAwareModel(DummyBackbone(), num_slots=2)
+    with torch.no_grad():
+        model.route_head.weight.zero_()
+        model.route_head.bias.copy_(torch.tensor([8.0, 0.0, 0.0]))
+        model.route_embedding.weight.zero_()
+        model.route_embedding.weight[ROUTE_LABELS[ASK_ROUTE], 0] = 3.0
+        model.slot_head.weight.zero_()
+        model.slot_head.bias.zero_()
+        model.slot_head.weight[1, model.hidden_size] = 1.0
+    batch = {"input_ids": torch.tensor([[1, 2]]), "context_lengths": torch.tensor([2])}
+    ordinary = model(**batch, hard_route_condition=True)
+    follow_up = model(
+        **batch, hard_route_condition=True,
+        slot_route_ids=torch.tensor([ROUTE_LABELS[ASK_ROUTE]]),
+    )
+    assert ordinary["route_logits"].argmax(-1).item() == ROUTE_LABELS[ANSWER_ROUTE]
+    assert torch.equal(ordinary["route_logits"], follow_up["route_logits"])
+    assert ordinary["slot_logits"][0, 1].item() == 0.0
+    assert follow_up["slot_logits"][0, 1].item() == 3.0
+    assert follow_up["slot_condition_route"].item() == ROUTE_LABELS[ASK_ROUTE]
+    with pytest.raises(ValueError, match="one route id per context"):
+        model(**batch, slot_route_ids=torch.tensor([0, 1]))
+    with pytest.raises(ValueError, match="unknown route id"):
+        model(**batch, slot_route_ids=torch.tensor([99]))
+
+
+def test_mixed_training_views_keep_slot_labels_masked():
+    rows = [{
+        "pair_id": "p1", "task_type": "normal_dialogue",
+        "messages": [{"role": "user", "content": "Cough for three days"}],
+        "completion": "Please rest. When is the cough worse?",
+    }]
+    example = build_examples(
+        DummyProcessor(), rows, {"p1": "aggravating_factor"}, {"aggravating_factor": 0}
+    )[0]
+    assert example["route"] == ANSWER_AND_ASK_ROUTE
+    assert example["slot_label"] == -100

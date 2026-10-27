@@ -11,3 +11,9 @@
 
 - `data/EviGap-Med/`：EviGap-Med 训练数据，包含 1,000 个上下文对、2,000 个训练视图。其中，`sft_candidates.auto.jsonl` 为训练视图，`paired_contexts.auto.jsonl` 为配对审计记录。
 - `example/data/fused_medical/general/test.jsonl`：主评测测试集。
+
+## 推理与检查
+
+混合回复依次生成回答、从增广对话预测槽位、以 `ASK + slot` 生成追问，最后拼接为一条回复。槽位训练监督仍只用于 `ASK` 视图；推理默认不额外限制输出长度。
+
+使用方法、评估入口及测试说明见 [串行推理说明](docs/serial_inference.md)。
